@@ -10,7 +10,7 @@ const app = express();
 
 // Enable CORS
 app.use(cors({
-  origin: 'http://localhost:3000', // allow only this origin
+  origin: 'http://localhost:5173', // allow only this origin
   methods: ['GET', 'POST', 'PUT', 'DELETE'], // allowed methods
   credentials: true, // if using cookies/session
 }));
