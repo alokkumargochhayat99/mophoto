@@ -10,7 +10,7 @@ const app = express();
 
 // Enable CORS
 app.use(cors({
-  origin: 'http://api.mophoto.online', // allow only this origin
+  origin: 'https://api.mophoto.online', // allow only this origin
   methods: ['GET', 'POST', 'PUT', 'DELETE'], // allowed methods
   credentials: true, // if using cookies/session
 }));
