@@ -8,16 +8,14 @@ const cors = require('cors');
 
 const app = express();
 
-// Increase payload limits
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ limit: '10mb', extended: true }));
-
 // Enable CORS
 app.use(cors({
   origin: 'https://mophoto.in.net', // allow only this origin
   methods: ['GET', 'POST', 'PUT', 'DELETE'], // allowed methods
   credentials: true, // if using cookies/session
 }));
+
+app.use(express.json());
 
 // Folders
 const imgsFolder = path.join(__dirname, 'imgs');
@@ -26,13 +24,6 @@ const previewFolder = path.join(__dirname, 'preview');
 // Download tracking
 let activeDownloads = 0;
 const MAX_DOWNLOADS = 200;
-
-// File size limits
-const FILE_LIMITS = {
-  maxFileSize: 8 * 1024 * 1024, // 8MB limit
-  maxFiles: 3, // Reduced from 5 to handle larger files
-  maxTotalSize: 15 * 1024 * 1024 // 15MB total per request
-};
 
 // Ensure folders exist
 [imgsFolder, previewFolder].forEach(folder => {
@@ -55,14 +46,10 @@ const storage = multer.diskStorage({
 const upload = multer({
   storage: storage,
   limits: {
-    fileSize: FILE_LIMITS.maxFileSize,
-    files: FILE_LIMITS.maxFiles,
-    parts: 100,
-    fields: 50
+    fileSize: 10 * 1024 * 1024, // 10MB limit
+    files: 5 // Max 5 files at once
   },
   fileFilter: (req, file, cb) => {
-    console.log(`📥 Receiving file: ${file.originalname} (${file.size} bytes)`);
-    
     if (file.mimetype.startsWith('image/')) {
       cb(null, true);
     } else {
@@ -70,25 +57,6 @@ const upload = multer({
     }
   }
 });
-
-// Custom middleware to check total upload size
-const checkTotalSize = (req, res, next) => {
-  if (!req.files || req.files.length === 0) {
-    return next();
-  }
-  
-  const totalSize = req.files.reduce((sum, file) => sum + file.size, 0);
-  
-  if (totalSize > FILE_LIMITS.maxTotalSize) {
-    return res.status(413).json({
-      error: 'Total upload size too large',
-      maxSize: `${(FILE_LIMITS.maxTotalSize / 1024 / 1024).toFixed(2)}MB`,
-      actualSize: `${(totalSize / 1024 / 1024).toFixed(2)}MB`
-    });
-  }
-  
-  next();
-};
 
 // Function to create preview image
 const createPreview = async (fileName) => {
@@ -98,7 +66,7 @@ const createPreview = async (fileName) => {
   try {
     await sharp(inputPath)
       .rotate()
-      .resize({ width: 1000, withoutEnlargement: true })
+      .resize({ width: 1000 })
       .toFormat('webp')
       .webp({ quality: 30 }) // Low quality for preview
       .toFile(outputPath);
@@ -109,124 +77,82 @@ const createPreview = async (fileName) => {
   }
 };
 
-// Error handling middleware for multer
-const handleMulterError = (error, req, res, next) => {
-  if (error instanceof multer.MulterError) {
-    if (error.code === 'LIMIT_FILE_SIZE') {
-      return res.status(413).json({
-        error: 'File too large',
-        maxSize: `${(FILE_LIMITS.maxFileSize / 1024 / 1024).toFixed(2)}MB`,
-        message: 'Please compress your images before uploading'
+// Upload API endpoint
+app.post('/api/upload', upload.array('images', 5), async (req, res) => {
+  // Simple auth check (optional)
+  const authHeader = req.headers.authorization;
+  if (process.env.UPLOAD_SECRET && authHeader !== `Bearer ${process.env.UPLOAD_SECRET}`) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  
+  if (!req.files || req.files.length === 0) {
+    return res.status(400).json({ error: 'No files uploaded' });
+  }
+  
+  console.log(`📤 Received ${req.files.length} files`);
+  
+  const results = [];
+  
+  for (const file of req.files) {
+    try {
+      // Create preview
+      await createPreview(file.filename);
+      
+      results.push({
+        filename: file.filename,
+        size: file.size,
+        status: 'success'
       });
-    } else if (error.code === 'LIMIT_FILE_COUNT') {
-      return res.status(413).json({
-        error: 'Too many files',
-        maxFiles: FILE_LIMITS.maxFiles
+      
+      console.log(`✅ Processed: ${file.filename}`);
+    } catch (error) {
+      results.push({
+        filename: file.filename,
+        status: 'error',
+        error: error.message
       });
-    } else if (error.code === 'LIMIT_UNEXPECTED_FILE') {
-      return res.status(400).json({
-        error: 'Unexpected file field'
+      
+      console.error(`❌ Failed to process: ${file.filename}`, error.message);
+    }
+  }
+  
+  res.json({
+    message: 'Upload completed',
+    results: results,
+    totalFiles: req.files.length
+  });
+});
+
+// Manual upload via admin panel
+app.post('/api/admin/upload', upload.array('images', 10), async (req, res) => {
+  if (!req.files || req.files.length === 0) {
+    return res.status(400).json({ error: 'No files uploaded' });
+  }
+  
+  const results = [];
+  
+  for (const file of req.files) {
+    try {
+      await createPreview(file.filename);
+      results.push({
+        filename: file.filename,
+        size: file.size,
+        status: 'success'
+      });
+    } catch (error) {
+      results.push({
+        filename: file.filename,
+        status: 'error',
+        error: error.message
       });
     }
   }
   
-  return res.status(500).json({
-    error: 'Upload failed',
-    message: error.message
+  res.json({
+    message: 'Files uploaded successfully',
+    results: results
   });
-};
-
-// Upload API endpoint
-app.post('/api/upload', 
-  upload.array('images', FILE_LIMITS.maxFiles), 
-  handleMulterError,
-  checkTotalSize,
-  async (req, res) => {
-    // Simple auth check (optional)
-    const authHeader = req.headers.authorization;
-    if (process.env.UPLOAD_SECRET && authHeader !== `Bearer ${process.env.UPLOAD_SECRET}`) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-    
-    if (!req.files || req.files.length === 0) {
-      return res.status(400).json({ error: 'No files uploaded' });
-    }
-    
-    const totalSize = req.files.reduce((sum, file) => sum + file.size, 0);
-    console.log(`📤 Received ${req.files.length} files (Total: ${(totalSize / 1024 / 1024).toFixed(2)}MB)`);
-    
-    const results = [];
-    
-    for (const file of req.files) {
-      try {
-        console.log(`Processing: ${file.filename} (${(file.size / 1024 / 1024).toFixed(2)}MB)`);
-        
-        // Create preview
-        await createPreview(file.filename);
-        
-        results.push({
-          filename: file.filename,
-          size: file.size,
-          sizeMB: (file.size / 1024 / 1024).toFixed(2),
-          status: 'success'
-        });
-        
-        console.log(`✅ Processed: ${file.filename}`);
-      } catch (error) {
-        results.push({
-          filename: file.filename,
-          status: 'error',
-          error: error.message
-        });
-        
-        console.error(`❌ Failed to process: ${file.filename}`, error.message);
-      }
-    }
-    
-    res.json({
-      message: 'Upload completed',
-      results: results,
-      totalFiles: req.files.length,
-      totalSizeMB: (totalSize / 1024 / 1024).toFixed(2)
-    });
-  }
-);
-
-// Manual upload via admin panel
-app.post('/api/admin/upload', 
-  upload.array('images', 10), 
-  handleMulterError,
-  async (req, res) => {
-    if (!req.files || req.files.length === 0) {
-      return res.status(400).json({ error: 'No files uploaded' });
-    }
-    
-    const results = [];
-    
-    for (const file of req.files) {
-      try {
-        await createPreview(file.filename);
-        results.push({
-          filename: file.filename,
-          size: file.size,
-          sizeMB: (file.size / 1024 / 1024).toFixed(2),
-          status: 'success'
-        });
-      } catch (error) {
-        results.push({
-          filename: file.filename,
-          status: 'error',
-          error: error.message
-        });
-      }
-    }
-    
-    res.json({
-      message: 'Files uploaded successfully',
-      results: results
-    });
-  }
-);
+});
 
 // Get paginated images API
 app.get('/api/imgs', async (req, res) => {
@@ -258,18 +184,11 @@ app.get('/api/imgs', async (req, res) => {
     const startIndex = (page - 1) * limit;
     const paginatedFiles = sortedFiles.slice(startIndex, startIndex + limit);
 
-    const images = paginatedFiles.map((file) => {
-      const filePath = path.join(imgsFolder, file);
-      const stats = fs.statSync(filePath);
-      
-      return {
-        url: `${process.env.BASE_URL}/preview/${file}`, // Preview URL
-        downloadUrl: `${process.env.BASE_URL}/api/download/${file}`, // Download URL
-        filename: file,
-        size: stats.size,
-        sizeMB: (stats.size / 1024 / 1024).toFixed(2)
-      };
-    });
+    const images = paginatedFiles.map((file) => ({
+      url: `${process.env.BASE_URL}/preview/${file}`, // Preview URL
+      downloadUrl: `${process.env.BASE_URL}/api/download/${file}`, // Download URL
+      filename: file
+    }));
 
     res.status(200).json({
       currentPage: page,
@@ -343,24 +262,14 @@ app.get('/admin', (req, res) => {
             .results { margin: 20px 0; }
             .success { color: green; }
             .error { color: red; }
-            .info { background: #f8f9fa; padding: 15px; border-radius: 5px; margin: 10px 0; }
-            .file-item { margin: 5px 0; padding: 5px; background: #fff; border: 1px solid #ddd; }
         </style>
     </head>
     <body>
         <h1>Image Upload Admin Panel</h1>
         
-        <div class="info">
-            <strong>Upload Limits:</strong><br>
-            • Max file size: ${(FILE_LIMITS.maxFileSize / 1024 / 1024).toFixed(2)}MB per file<br>
-            • Max files: ${FILE_LIMITS.maxFiles} files per upload<br>
-            • Max total: ${(FILE_LIMITS.maxTotalSize / 1024 / 1024).toFixed(2)}MB per request
-        </div>
-        
         <div class="upload-area" id="uploadArea">
             <p>Drag and drop images here or click to select</p>
             <input type="file" id="fileInput" multiple accept="image/*" class="file-input">
-            <div id="fileList"></div>
             <button id="uploadBtn" class="upload-btn">Upload Images</button>
         </div>
         
@@ -371,27 +280,6 @@ app.get('/admin', (req, res) => {
             const fileInput = document.getElementById('fileInput');
             const uploadBtn = document.getElementById('uploadBtn');
             const results = document.getElementById('results');
-            const fileList = document.getElementById('fileList');
-            
-            const updateFileList = () => {
-                const files = Array.from(fileInput.files);
-                if (files.length === 0) {
-                    fileList.innerHTML = '';
-                    return;
-                }
-                
-                const totalSize = files.reduce((sum, file) => sum + file.size, 0);
-                const totalMB = (totalSize / 1024 / 1024).toFixed(2);
-                
-                fileList.innerHTML = '<div><strong>Selected Files (' + files.length + '): ' + totalMB + 'MB total</strong></div>' +
-                    files.map(file => {
-                        const fileMB = (file.size / 1024 / 1024).toFixed(2);
-                        const tooLarge = file.size > ${FILE_LIMITS.maxFileSize};
-                        return '<div class="file-item' + (tooLarge ? ' error' : '') + '">' + file.name + ' (' + fileMB + 'MB)' + (tooLarge ? ' - TOO LARGE!' : '') + '</div>';
-                    }).join('');
-            };
-            
-            fileInput.addEventListener('change', updateFileList);
             
             uploadArea.addEventListener('click', () => fileInput.click());
             
@@ -408,20 +296,12 @@ app.get('/admin', (req, res) => {
                 e.preventDefault();
                 uploadArea.classList.remove('dragover');
                 fileInput.files = e.dataTransfer.files;
-                updateFileList();
             });
             
             uploadBtn.addEventListener('click', async () => {
                 const files = fileInput.files;
                 if (files.length === 0) {
                     alert('Please select files first');
-                    return;
-                }
-                
-                // Check file sizes
-                const oversizedFiles = Array.from(files).filter(file => file.size > ${FILE_LIMITS.maxFileSize});
-                if (oversizedFiles.length > 0) {
-                    alert('Some files are too large. Please compress them first.');
                     return;
                 }
                 
@@ -442,16 +322,12 @@ app.get('/admin', (req, res) => {
                     const result = await response.json();
                     
                     results.innerHTML = '<h3>Upload Results:</h3>';
-                    if (result.results) {
-                        result.results.forEach(item => {
-                            const div = document.createElement('div');
-                            div.className = item.status;
-                            div.textContent = item.filename + ': ' + item.status + (item.sizeMB ? ' (' + item.sizeMB + 'MB)' : '');
-                            results.appendChild(div);
-                        });
-                    } else {
-                        results.innerHTML = '<div class="error">Error: ' + result.error + '</div>';
-                    }
+                    result.results.forEach(item => {
+                        const div = document.createElement('div');
+                        div.className = item.status;
+                        div.textContent = item.filename + ': ' + item.status;
+                        results.appendChild(div);
+                    });
                     
                 } catch (error) {
                     results.innerHTML = '<div class="error">Upload failed: ' + error.message + '</div>';
@@ -460,7 +336,6 @@ app.get('/admin', (req, res) => {
                 uploadBtn.disabled = false;
                 uploadBtn.textContent = 'Upload Images';
                 fileInput.value = '';
-                updateFileList();
             });
         </script>
     </body>
@@ -473,8 +348,7 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'healthy',
     timestamp: new Date().toISOString(),
-    activeDownloads,
-    limits: FILE_LIMITS
+    activeDownloads
   });
 });
 
@@ -485,6 +359,4 @@ app.listen(PORT, () => {
   console.log(`📁 Images folder: ${imgsFolder}`);
   console.log(`👀 Preview folder: ${previewFolder}`);
   console.log(`🔗 Admin panel: http://localhost:${PORT}/admin`);
-  console.log(`⚙️ Max file size: ${(FILE_LIMITS.maxFileSize / 1024 / 1024).toFixed(2)}MB`);
-  console.log(`⚙️ Max files per upload: ${FILE_LIMITS.maxFiles}`);
 });
